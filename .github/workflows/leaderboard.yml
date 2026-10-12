@@ -18,6 +18,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    
+      - name: Clean up old workflow runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_ID: ${{ github.workflow }}
+        run: |
+          gh run list \
+            --repo "$REPO" \
+            --workflow "$WORKFLOW_ID" \
+            --limit 100 \
+            --json databaseId \
+            --jq '.[3:] | .[].databaseId' |
+          while read -r run_id; do
+            [ -z "$run_id" ] && continue
+            gh run delete "$run_id" --repo "$REPO" || true
+          done
+
       - name: Check out repository
         uses: actions/checkout@v4
 
