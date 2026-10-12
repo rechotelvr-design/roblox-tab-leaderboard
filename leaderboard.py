@@ -1,7 +1,6 @@
 
+import csv
 import os
-import json
-import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -9,16 +8,11 @@ import requests
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"].strip()
 MESSAGE_FILE = Path("message_id.txt")
-SESSION = str(uuid.uuid4())
+CSV_FILE = Path("us_chart.csv")
 
 HEADERS = {
-    "User-Agent": "RobloxTabLeaderboard/1.0",
+    "User-Agent": "RobloxTabAmericaLeaderboard/1.0",
 }
-
-EXPLORE_URL = (
-    "https://apis.roblox.com/explore-api/v1/"
-    "get-sort-content"
-)
 
 GAMES_URL = "https://games.roblox.com/v1/games"
 
@@ -34,68 +28,70 @@ def get_json(url, params=None):
     return response.json()
 
 
-def find_universe_ids(data):
-    """Extract game universe IDs while preserving chart order."""
+def read_us_chart():
+    """Read universe IDs in the order provided by the US chart CSV."""
+    if not CSV_FILE.exists():
+        raise RuntimeError(
+            "Missing us_chart.csv. Export the US Top Playing Now "
+            "chart from Rival Ducks and add the CSV to this repository."
+        )
+
     ids = []
     seen = set()
 
-    def walk(obj):
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if key.lower() in ("universeid", "universe_id"):
-                    try:
-                        game_id = int(value)
-                        if game_id not in seen:
-                            seen.add(game_id)
-                            ids.append(game_id)
-                    except (TypeError, ValueError):
-                        pass
+    with CSV_FILE.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
 
-                walk(value)
+        if not reader.fieldnames:
+            raise RuntimeError("The US chart CSV has no header row.")
 
-        elif isinstance(obj, list):
-            for item in obj:
-                walk(item)
+        # Match common universe-ID column names.
+        id_columns = {
+            "universeid",
+            "universe_id",
+            "universe id",
+            "gameuniverseid",
+        }
+        id_column = next(
+            (
+                column
+                for column in reader.fieldnames
+                if column.strip().lower() in id_columns
+            ),
+            None,
+        )
 
-        elif isinstance(obj, str) and obj.startswith(("{", "[")):
+        if id_column is None:
+            raise RuntimeError(
+                "Couldn't find a universe ID column in us_chart.csv. "
+                f"CSV columns: {reader.fieldnames}"
+            )
+
+        for row in reader:
             try:
-                walk(json.loads(obj))
-            except json.JSONDecodeError:
-                pass
+                universe_id = int(row[id_column].strip())
+            except (TypeError, ValueError, AttributeError):
+                continue
 
-    walk(data)
+            if universe_id not in seen:
+                seen.add(universe_id)
+                ids.append(universe_id)
+
+    if not ids:
+        raise RuntimeError("No universe IDs were found in the US chart CSV.")
+
+    print(f"US chart universe IDs found: {len(ids)}")
     return ids
 
 
 def get_top_games():
-    discovery = get_json(
-        EXPLORE_URL,
-        {
-            "sessionId": SESSION,
-            "sortId": "top-playing-now",
-            "device": "all",
-            "country": "all",
-            "maxRows": 100,
-        },
-    )
-
-    ids = find_universe_ids(discovery)
-
-    print("Chart response keys:", list(discovery.keys()))
-    print("Unique universe IDs found:", len(ids))
-
-    if not ids:
-        raise RuntimeError(
-            "No game IDs found in Roblox's chart response. "
-            "The API response may have changed."
-        )
-
-    # Fetch metadata in batches, keeping the original chart order.
+    # Keep the order of the US chart. Use Roblox's API only for
+    # worldwide metadata and concurrent player counts.
+    ids = read_us_chart()
     games_by_id = {}
 
     for start in range(0, len(ids), 50):
         batch = ids[start:start + 50]
-
         data = get_json(
             GAMES_URL,
             {"universeIds": ",".join(map(str, batch))},
@@ -105,28 +101,24 @@ def get_top_games():
             games_by_id[game["id"]] = game
 
     games = []
-
     for universe_id in ids:
         game = games_by_id.get(universe_id)
-
         if game and isinstance(game.get("playing"), (int, float)):
             games.append(game)
 
-    # Rank by the latest live player count.
-    games.sort(
-        key=lambda game: game["playing"],
-        reverse=True,
-    )
+    # Ranking follows the US chart order, not worldwide player count.
+    games = games[:10]
 
-    print("Games with player counts:", len(games))
-
-    for game in games[:10]:
-        print(
-            f'{game.get("name", "Unknown")}: '
-            f'{int(game["playing"]):,} players'
+    if not games:
+        raise RuntimeError(
+            "No games with worldwide player counts could be retrieved."
         )
 
-    return games[:10]
+    for rank, game in enumerate(games, 1):
+        print(f'{rank}. {game.get("name", "Unknown")}: '
+              f'{int(game["playing"]):,} global players')
+
+    return games
 
 
 def make_embed(games):
@@ -135,8 +127,8 @@ def make_embed(games):
     for rank, game in enumerate(games, 1):
         name = game.get("name", "Unknown game")
         name = name.replace("[", "").replace("]", "")
-
         place_id = game.get("rootPlaceId")
+
         link = (
             f"https://www.roblox.com/games/{place_id}"
             if place_id
@@ -144,21 +136,17 @@ def make_embed(games):
         )
 
         players = int(game["playing"])
-
         lines.append(
             f"**{rank}. [{name}]({link})** — "
-            f"👥 {players:,} playing"
+            f"🌎 {players:,} global players"
         )
 
     return {
-        "title": "🏆 Top 10 Roblox Games Right Now",
+        "title": "🇺🇸 US Top 10 Roblox Games",
         "description": "\n".join(lines),
         "color": 0x00A2FF,
         "footer": {
-            "text": (
-                "Roblox Tab • Worldwide chart • "
-                "Refreshes every 10 minutes"
-            )
+            "text": "Roblox Tab • US chart ranking • Global player counts"
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -173,7 +161,6 @@ def publish(embed):
 
     if message_id:
         url = f"{WEBHOOK}/messages/{message_id}"
-
         response = requests.patch(
             url,
             json={"embeds": [embed]},
@@ -182,10 +169,10 @@ def publish(embed):
 
         if response.status_code != 404:
             response.raise_for_status()
-            print("Updated existing leaderboard.")
+            print("Updated existing America leaderboard.")
             return
 
-        print("Old message missing; creating a replacement.")
+        print("Saved message was not found; creating a replacement.")
 
     response = requests.post(
         WEBHOOK,
@@ -197,14 +184,9 @@ def publish(embed):
 
     message_id = response.json()["id"]
     MESSAGE_FILE.write_text(message_id + "\n")
-
-    print("Created leaderboard:", message_id)
+    print("Created America leaderboard:", message_id)
 
 
 if __name__ == "__main__":
     games = get_top_games()
-
-    if not games:
-        raise RuntimeError("Roblox returned no games.")
-
     publish(make_embed(games))
