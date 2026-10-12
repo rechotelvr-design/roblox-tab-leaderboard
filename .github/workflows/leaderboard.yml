@@ -12,7 +12,8 @@ permissions:
 
 concurrency:
   group: roblox-tab-leaderboard
-  cancel-in-progress: false
+  cancel-in-progress: true
+
 
 jobs:
   update:
